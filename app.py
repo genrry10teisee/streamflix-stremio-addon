@@ -40,6 +40,7 @@ from providers import latanime
 from providers import seriesflix
 from providers import tioanime
 from providers import fanpelis
+from providers import cinecalidad
 from utils.flaresolverr import is_enabled as flaresolverr_enabled
 from utils import autoscrape
 
@@ -193,6 +194,16 @@ def manifest(request: Request):
                 {"name": "page", "isRequired": False, "options": [1, 2, 3, 4, 5]},
             ],
         },
+        {
+            "type": "movie",
+            "id": "cinecalidad_movies",
+            "name": "CineCalidad · Películas",
+            "extraSupported": ["search", "page"],
+            "extra": [
+                {"name": "search", "isRequired": False},
+                {"name": "page", "isRequired": False, "options": [1, 2, 3, 4, 5]},
+            ],
+        },
     ]
     return {
         "id": ADDON_ID,
@@ -203,7 +214,7 @@ def manifest(request: Request):
         "logo": "https://flixlatam.com/images/logo.png",
         "resources": ["catalog", "meta", "stream"],
         "types": ["movie", "series"],
-        "idPrefixes": ["tt", "flixlatam:", "latanime:", "seriesflix:", "tioanime:", "fanpelis:"],
+        "idPrefixes": ["tt", "flixlatam:", "latanime:", "seriesflix:", "tioanime:", "fanpelis:", "cinecalidad:"],
         "catalogs": catalogs,
         "behaviorHints": {"configurable": False},
     }
@@ -255,6 +266,8 @@ def catalog(item_type: str, cat_id: str, request: Request):
             items = fanpelis.get_movies(page=page, query=search)
         elif cat_id == "fanpelis_series":
             items = fanpelis.get_tvshows(page=page, query=search)
+        elif cat_id == "cinecalidad_movies":
+            items = cinecalidad.get_movies(page=page, query=search)
     except Exception as e:
         log.exception(f"catalog error: {e}")
 
@@ -456,6 +469,14 @@ def meta(item_type: str, item_id: str, request: Request):
             m["videos"] = videos
             return {"meta": m}
 
+    elif item_id.startswith("cinecalidad:"):
+        slug = item_id[len("cinecalidad:"):]
+        return {"meta": {
+            "id": f"cinecalidad:{slug}",
+            "type": "movie",
+            "name": slug.replace("-", " ").title(),
+        }}
+
     elif item_id.startswith("tt"):
         return _minimal_imdb_meta(item_type, item_id)
 
@@ -552,6 +573,13 @@ def stream(item_type: str, item_id: str, request: Request):
             post_id = int(parts[4]) if parts[4].isdigit() else None
             if post_id:
                 streams = fanpelis.resolve_streams(post_id)
+
+    # CineCalidad items: cinecalidad:{slug}
+    elif "cinecalidad:" in item_id and item_type == "movie":
+        parts = item_id.split(":")
+        if len(parts) >= 2:
+            slug = parts[1]
+            streams = cinecalidad.resolve_movie_streams(slug)
 
     # Plain IMDb IDs - use the auto-scraper to search ALL providers
     elif item_id.startswith("tt"):
