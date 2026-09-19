@@ -204,6 +204,24 @@ def manifest(request: Request):
                 {"name": "page", "isRequired": False, "options": [1, 2, 3, 4, 5]},
             ],
         },
+        {
+            "type": "movie",
+            "id": "global_search_movies",
+            "name": "🔍 Búsqueda Global · Películas",
+            "extraSupported": ["search"],
+            "extra": [
+                {"name": "search", "isRequired": True},
+            ],
+        },
+        {
+            "type": "series",
+            "id": "global_search_series",
+            "name": "🔍 Búsqueda Global · Series",
+            "extraSupported": ["search"],
+            "extra": [
+                {"name": "search", "isRequired": True},
+            ],
+        },
     ]
     return {
         "id": ADDON_ID,
@@ -268,6 +286,12 @@ def catalog(item_type: str, cat_id: str, request: Request):
             items = fanpelis.get_tvshows(page=page, query=search)
         elif cat_id == "cinecalidad_movies":
             items = cinecalidad.get_movies(page=page, query=search)
+        elif cat_id == "global_search_movies":
+            # Global search: search ALL movie providers in parallel
+            items = _global_search_movies(search)
+        elif cat_id == "global_search_series":
+            # Global search: search ALL series providers in parallel
+            items = _global_search_series(search)
     except Exception as e:
         log.exception(f"catalog error: {e}")
 
@@ -299,6 +323,109 @@ def _search_flixlatam(query: str, item_type: str) -> list[dict]:
     if item_type == "movie":
         return flixlatam.get_movies(page=1)
     return flixlatam.get_series(page=1)
+
+
+def _global_search_movies(query: str) -> list[dict]:
+    """
+    Search ALL movie providers in parallel and merge results.
+    Providers: FlixLatam, Fanpelis, CineCalidad.
+    """
+    import concurrent.futures
+    
+    if not query:
+        return []
+    
+    log.info(f"Global movie search: {query!r}")
+    all_items = []
+    seen_names = set()
+    
+    def search_provider(name, fn):
+        try:
+            results = fn(query)
+            log.info(f"  {name}: {len(results)} results")
+            return results
+        except Exception as e:
+            log.warning(f"  {name} search error: {e}")
+            return []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(search_provider, "Fanpelis", lambda q: fanpelis.get_movies(page=1, query=q)): None,
+            executor.submit(search_provider, "CineCalidad", lambda q: cinecalidad.search_movies(q)): None,
+        }
+        for future in concurrent.futures.as_completed(futures, timeout=30):
+            try:
+                results = future.result(timeout=30)
+                for item in results:
+                    # Deduplicate by name (case-insensitive)
+                    name_key = item.get("name", "").lower().strip()
+                    if name_key and name_key not in seen_names:
+                        seen_names.add(name_key)
+                        all_items.append(item)
+            except Exception as e:
+                log.warning(f"Global search error: {e}")
+    
+    # Filter by query (case-insensitive match in name)
+    q_lower = query.lower()
+    filtered = [item for item in all_items if q_lower in item.get("name", "").lower()]
+    
+    # If no exact matches, return all (Stremio will show them)
+    if not filtered:
+        filtered = all_items
+    
+    log.info(f"Global movie search: {len(filtered)} unique results")
+    return filtered[:30]  # Limit to 30 results
+
+
+def _global_search_series(query: str) -> list[dict]:
+    """
+    Search ALL series providers in parallel and merge results.
+    Providers: FlixLatam, SeriesFlix, Fanpelis, Latanime, TioAnime.
+    """
+    import concurrent.futures
+    
+    if not query:
+        return []
+    
+    log.info(f"Global series search: {query!r}")
+    all_items = []
+    seen_names = set()
+    
+    def search_provider(name, fn):
+        try:
+            results = fn(query)
+            log.info(f"  {name}: {len(results)} results")
+            return results
+        except Exception as e:
+            log.warning(f"  {name} search error: {e}")
+            return []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(search_provider, "SeriesFlix", lambda q: seriesflix.search_series(q)): None,
+            executor.submit(search_provider, "Fanpelis", lambda q: fanpelis.get_tvshows(page=1, query=q)): None,
+            executor.submit(search_provider, "Latanime", lambda q: latanime.search_anime(q)): None,
+            executor.submit(search_provider, "TioAnime", lambda q: tioanime.search_anime(q)): None,
+        }
+        for future in concurrent.futures.as_completed(futures, timeout=30):
+            try:
+                results = future.result(timeout=30)
+                for item in results:
+                    name_key = item.get("name", "").lower().strip()
+                    if name_key and name_key not in seen_names:
+                        seen_names.add(name_key)
+                        all_items.append(item)
+            except Exception as e:
+                log.warning(f"Global search error: {e}")
+    
+    # Filter by query
+    q_lower = query.lower()
+    filtered = [item for item in all_items if q_lower in item.get("name", "").lower()]
+    if not filtered:
+        filtered = all_items
+    
+    log.info(f"Global series search: {len(filtered)} unique results")
+    return filtered[:30]
 
 
 # ============================================================
