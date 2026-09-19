@@ -9,10 +9,15 @@ Strategy:
   3. Search Fanpelis: query API for the title (need TMDB metadata)
   4. Search SeriesFlix: query web search for the title
   5. Rank streams: 1080p > 720p > SD, Latino > Castellano > Sub
+
+Cache: resolved streams are cached for 1 hour per (item_type, item_id).
+If Stremio asks for the same item again within the cache window, we return
+the cached result instantly. Use invalidate_cache() to force a refresh.
 """
 
 import os
 import re
+import time
 import logging
 import concurrent.futures
 from typing import Optional
@@ -23,6 +28,66 @@ log = logging.getLogger(__name__)
 
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
 TMDB_BASE = "https://api.themoviedb.org/3"
+
+# ============================================================
+# Stream cache (in-memory, 1 hour TTL)
+# ============================================================
+_STREAM_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_CACHE_TTL = 3600  # 1 hour in seconds
+
+
+def _cache_key(item_type: str, item_id: str) -> str:
+    """Build a cache key from item type and ID (strips .json suffix)."""
+    clean_id = item_id.replace(".json", "")
+    return f"{item_type}:{clean_id}"
+
+
+def get_cached_streams(item_type: str, item_id: str) -> Optional[list[dict]]:
+    """Return cached streams if they exist and are not expired, else None."""
+    key = _cache_key(item_type, item_id)
+    if key in _STREAM_CACHE:
+        ts, streams = _STREAM_CACHE[key]
+        if time.time() - ts < _CACHE_TTL:
+            log.info(f"Cache HIT for {key} (age={int(time.time()-ts)}s)")
+            return streams
+        else:
+            log.info(f"Cache EXPIRED for {key}")
+            del _STREAM_CACHE[key]
+    return None
+
+
+def set_cached_streams(item_type: str, item_id: str, streams: list[dict]) -> None:
+    """Store streams in the cache with current timestamp."""
+    key = _cache_key(item_type, item_id)
+    _STREAM_CACHE[key] = (time.time(), streams)
+    log.info(f"Cache SET for {key} ({len(streams)} streams)")
+
+
+def invalidate_cache(item_type: str, item_id: str) -> bool:
+    """Remove a specific item from the cache. Returns True if it was present."""
+    key = _cache_key(item_type, item_id)
+    if key in _STREAM_CACHE:
+        del _STREAM_CACHE[key]
+        log.info(f"Cache INVALIDATED for {key}")
+        return True
+    return False
+
+
+def get_cache_stats() -> dict:
+    """Return cache statistics (size, oldest entry age, etc.)."""
+    now = time.time()
+    items = []
+    for key, (ts, streams) in _STREAM_CACHE.items():
+        items.append({
+            "key": key,
+            "age_seconds": int(now - ts),
+            "stream_count": len(streams),
+        })
+    return {
+        "total_items": len(_STREAM_CACHE),
+        "ttl_seconds": _CACHE_TTL,
+        "items": sorted(items, key=lambda x: x["age_seconds"]),
+    }
 
 
 def _tmdb_find(imdb_id: str, is_movie: bool) -> Optional[dict]:
@@ -221,7 +286,14 @@ def find_movie_streams(imdb_id: str) -> list[dict]:
     Tries all providers in parallel:
       1. FlixLatam (direct IMDb ID lookup - fastest)
       2. Fanpelis (search by title via TMDB metadata)
+    
+    Results are cached for 1 hour. Use invalidate_cache() to force refresh.
     """
+    # Check cache first
+    cached = get_cached_streams("movie", imdb_id)
+    if cached is not None:
+        return cached
+
     # Get TMDB metadata for title-based searches
     tmdb_info = _tmdb_find(imdb_id, is_movie=True)
     title = tmdb_info.get("title") if tmdb_info else ""
@@ -258,7 +330,10 @@ def find_movie_streams(imdb_id: str) -> list[dict]:
             seen_urls.add(url)
             deduped.append(s)
 
-    return sort_streams(deduped)
+    result = sort_streams(deduped)
+    # Cache the result
+    set_cached_streams("movie", imdb_id, result)
+    return result
 
 
 def find_episode_streams(imdb_id: str, season: int, episode: int) -> list[dict]:
@@ -269,7 +344,15 @@ def find_episode_streams(imdb_id: str, season: int, episode: int) -> list[dict]:
       1. FlixLatam (direct IMDb ID lookup)
       2. SeriesFlix (search by title)
       3. Fanpelis (search by title)
+    
+    Results are cached for 1 hour. Use invalidate_cache() to force refresh.
     """
+    # Cache key includes season and episode
+    cache_id = f"{imdb_id}:{season}:{episode}"
+    cached = get_cached_streams("series", cache_id)
+    if cached is not None:
+        return cached
+
     tmdb_info = _tmdb_find(imdb_id, is_movie=False)
     title = tmdb_info.get("title") if tmdb_info else ""
 
@@ -303,7 +386,9 @@ def find_episode_streams(imdb_id: str, season: int, episode: int) -> list[dict]:
             seen_urls.add(url)
             deduped.append(s)
 
-    return sort_streams(deduped)
+    result = sort_streams(deduped)
+    set_cached_streams("series", cache_id, result)
+    return result
 
 
 def find_anime_streams(title: str, episode: int) -> list[dict]:
