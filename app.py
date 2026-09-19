@@ -41,6 +41,7 @@ from providers import seriesflix
 from providers import tioanime
 from providers import fanpelis
 from utils.flaresolverr import is_enabled as flaresolverr_enabled
+from utils import autoscrape
 
 # ============================================================
 # Logging
@@ -505,17 +506,18 @@ def stream(item_type: str, item_id: str):
             if post_id:
                 streams = fanpelis.resolve_streams(post_id)
 
-    # Plain IMDb IDs
+    # Plain IMDb IDs - use the auto-scraper to search ALL providers
     elif item_id.startswith("tt"):
         if item_type == "movie":
-            streams = flixlatam.resolve_movie_streams(item_id)
+            # Auto-scrape across all providers
+            streams = autoscrape.find_movie_streams(item_id)
         elif item_type == "series" and ":" in item_id:
             parts = item_id.split(":")
             if len(parts) >= 3:
                 imdb_id = parts[0]
                 season = int(parts[1])
                 episode = int(parts[2])
-                streams = flixlatam.resolve_episode_streams(imdb_id, season, episode)
+                streams = autoscrape.find_episode_streams(imdb_id, season, episode)
 
     if not streams:
         return {"streams": []}
