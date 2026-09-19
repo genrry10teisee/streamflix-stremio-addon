@@ -41,6 +41,7 @@ from providers import seriesflix
 from providers import tioanime
 from providers import fanpelis
 from providers import cinecalidad
+from providers import sololatino
 from utils.flaresolverr import is_enabled as flaresolverr_enabled
 from utils import autoscrape
 
@@ -222,6 +223,24 @@ def manifest(request: Request):
                 {"name": "search", "isRequired": True},
             ],
         },
+        {
+            "type": "movie",
+            "id": "sololatino_movies",
+            "name": "SoloLatino · Películas ⚠️",
+            "extraSupported": ["page"],
+            "extra": [
+                {"name": "page", "isRequired": False, "options": [1, 2, 3, 4, 5]},
+            ],
+        },
+        {
+            "type": "series",
+            "id": "sololatino_series",
+            "name": "SoloLatino · Series ⚠️",
+            "extraSupported": ["page"],
+            "extra": [
+                {"name": "page", "isRequired": False, "options": [1, 2, 3, 4, 5]},
+            ],
+        },
     ]
     return {
         "id": ADDON_ID,
@@ -232,7 +251,7 @@ def manifest(request: Request):
         "logo": "https://flixlatam.com/images/logo.png",
         "resources": ["catalog", "meta", "stream"],
         "types": ["movie", "series"],
-        "idPrefixes": ["tt", "flixlatam:", "latanime:", "seriesflix:", "tioanime:", "fanpelis:", "cinecalidad:"],
+        "idPrefixes": ["tt", "flixlatam:", "latanime:", "seriesflix:", "tioanime:", "fanpelis:", "cinecalidad:", "sololatino:"],
         "catalogs": catalogs,
         "behaviorHints": {"configurable": False},
     }
@@ -292,6 +311,10 @@ def catalog(item_type: str, cat_id: str, request: Request):
         elif cat_id == "global_search_series":
             # Global search: search ALL series providers in parallel
             items = _global_search_series(search)
+        elif cat_id == "sololatino_movies":
+            items = sololatino.get_movies(page=page)
+        elif cat_id == "sololatino_series":
+            items = sololatino.get_series(page=page)
     except Exception as e:
         log.exception(f"catalog error: {e}")
 
@@ -604,6 +627,14 @@ def meta(item_type: str, item_id: str, request: Request):
             "name": slug.replace("-", " ").title(),
         }}
 
+    elif item_id.startswith("sololatino:"):
+        slug = item_id[len("sololatino:"):]
+        return {"meta": {
+            "id": f"sololatino:{slug}",
+            "type": item_type,
+            "name": slug.replace("-", " ").title(),
+        }}
+
     elif item_id.startswith("tt"):
         return _minimal_imdb_meta(item_type, item_id)
 
@@ -708,6 +739,13 @@ def stream(item_type: str, item_id: str, request: Request):
             slug = parts[1]
             streams = cinecalidad.resolve_movie_streams(slug)
 
+    # SoloLatino items: sololatino:{slug}
+    elif "sololatino:" in item_id:
+        parts = item_id.split(":")
+        if len(parts) >= 2:
+            slug = parts[1]
+            streams = sololatino.resolve_movie_streams(slug)
+
     # Plain IMDb IDs - use the auto-scraper to search ALL providers
     elif item_id.startswith("tt"):
         if item_type == "movie":
@@ -799,6 +837,196 @@ def refresh_cache(item_type: str, item_id: str, request: Request):
         "item_id": item_id_clean,
         "streams_found": len(streams),
         "streams": streams,
+    }
+
+
+# ============================================================
+# .strm file endpoints (for Jellyfin/Emby/Plex integration)
+# ============================================================
+# A .strm file is a text file containing a URL. When Jellyfin/Emby scans
+# a library folder and finds a .strm file, it treats the URL inside as
+# the media source and plays it directly.
+#
+# Usage:
+#   GET /strm/movie/tt0816692.strm?token=success
+#   → returns a .strm file with the best stream URL for Interstellar
+#
+#   GET /strm/series/tt1196946:1:1.strm?token=success
+#   → returns a .strm file for The Mentalist S1E1
+
+from fastapi import Response
+
+@app.get("/strm/movie/{imdb_id}.strm")
+def strm_movie(imdb_id: str, request: Request):
+    """Return a .strm file for a movie (Jellyfin/Emby compatible)."""
+    err = _require_token(request)
+    if err:
+        return err
+    imdb_id = imdb_id.replace(".strm", "")
+    log.info(f"strm movie: {imdb_id}")
+    
+    # Get streams (uses cache)
+    streams = autoscrape.find_movie_streams(imdb_id)
+    if not streams:
+        return JSONResponse(status_code=404, content={"error": "No streams found"})
+    
+    # Take the best stream (already sorted by quality)
+    best_url = streams[0]["url"]
+    
+    # Return as .strm file (plain text with URL)
+    return Response(
+        content=best_url,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{imdb_id}.strm"',
+        },
+    )
+
+
+@app.get("/strm/series/{item_id}.strm")
+def strm_series(item_id: str, request: Request):
+    """Return a .strm file for an episode (Jellyfin/Emby compatible)."""
+    err = _require_token(request)
+    if err:
+        return err
+    item_id = item_id.replace(".strm", "")
+    log.info(f"strm series: {item_id}")
+    
+    parts = item_id.split(":")
+    if len(parts) < 3:
+        return JSONResponse(status_code=400, content={"error": "Format: imdb_id:season:episode"})
+    
+    imdb_id = parts[0]
+    season = int(parts[1])
+    episode = int(parts[2])
+    
+    streams = autoscrape.find_episode_streams(imdb_id, season, episode)
+    if not streams:
+        return JSONResponse(status_code=404, content={"error": "No streams found"})
+    
+    best_url = streams[0]["url"]
+    filename = f"{imdb_id}_S{season:02d}E{episode:02d}.strm"
+    
+    return Response(
+        content=best_url,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+# ============================================================
+# Library API (for sync scripts and Jellyfin integration)
+# ============================================================
+@app.get("/library")
+def library_home(request: Request):
+    """Library home — shows available endpoints."""
+    err = _require_token(request)
+    if err:
+        return err
+    base = str(request.base_url).rstrip("/")
+    q = f"?token={ADDON_TOKEN}" if ADDON_TOKEN else ""
+    return {
+        "library": {
+            "movies_json": f"{base}/library/movies.json{q}",
+            "series_json": f"{base}/library/series.json{q}",
+            "strm_movie": f"{base}/strm/movie/{{imdb_id}}.strm{q}",
+            "strm_episode": f"{base}/strm/series/{{imdb_id}}:{{season}}:{{episode}}.strm{q}",
+            "sync_script": "Run the sync script to download all .strm files for Jellyfin",
+        },
+        "providers": ["FlixLatam", "Latanime", "SeriesFlix", "TioAnime", "Fanpelis", "CineCalidad", "SoloLatino"],
+        "total_movies": "see /library/movies.json",
+        "total_series": "see /library/series.json",
+    }
+
+
+@app.get("/library/movies.json")
+def library_movies(request: Request, page: int = 1, search: str = ""):
+    """JSON list of all movies from all providers (for sync scripts)."""
+    err = _require_token(request)
+    if err:
+        return err
+    
+    import concurrent.futures
+    
+    all_movies = []
+    seen = set()
+    
+    def fetch(name, fn):
+        try:
+            return fn()
+        except:
+            return []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(fetch, "Fanpelis", lambda: fanpelis.get_movies(page=page, query=search)): "Fanpelis",
+            executor.submit(fetch, "CineCalidad", lambda: cinecalidad.get_movies(page=page, query=search)): "CineCalidad",
+            executor.submit(fetch, "FlixLatam", lambda: flixlatam.get_movies(page=page)): "FlixLatam",
+        }
+        for future in concurrent.futures.as_completed(futures, timeout=30):
+            provider = futures[future]
+            try:
+                for m in future.result():
+                    key = m.get("slug", m.get("name", ""))
+                    if key not in seen:
+                        seen.add(key)
+                        m["provider"] = provider
+                        m["strm_url"] = f"/strm/movie/{m.get('id', '')}.strm"
+                        all_movies.append(m)
+            except:
+                pass
+    
+    return {
+        "page": page,
+        "total": len(all_movies),
+        "movies": all_movies,
+    }
+
+
+@app.get("/library/series.json")
+def library_series(request: Request, page: int = 1, search: str = ""):
+    """JSON list of all series from all providers (for sync scripts)."""
+    err = _require_token(request)
+    if err:
+        return err
+    
+    import concurrent.futures
+    
+    all_series = []
+    seen = set()
+    
+    def fetch(name, fn):
+        try:
+            return fn()
+        except:
+            return []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(fetch, "SeriesFlix", lambda: seriesflix.get_series_list(page=page, query=search)): "SeriesFlix",
+            executor.submit(fetch, "Fanpelis", lambda: fanpelis.get_tvshows(page=page, query=search)): "Fanpelis",
+            executor.submit(fetch, "Latanime", lambda: latanime.get_anime_list(page=page, query=search)): "Latanime",
+            executor.submit(fetch, "TioAnime", lambda: tioanime.get_anime_list(page=page, query=search)): "TioAnime",
+            executor.submit(fetch, "FlixLatam", lambda: flixlatam.get_series(page=page)): "FlixLatam",
+        }
+        for future in concurrent.futures.as_completed(futures, timeout=30):
+            provider = futures[future]
+            try:
+                for s in future.result():
+                    key = s.get("slug", s.get("name", ""))
+                    if key not in seen:
+                        seen.add(key)
+                        s["provider"] = provider
+                        all_series.append(s)
+            except:
+                pass
+    
+    return {
+        "page": page,
+        "total": len(all_series),
+        "series": all_series,
     }
 
 
