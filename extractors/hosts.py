@@ -368,6 +368,256 @@ def extract_mega(embed_url: str) -> Optional[str]:
 
 
 # ============================================================
+# Streamtape extractor
+# ============================================================
+STREAMTAPE_DOMAINS = ["streamtape.com", "streamtape.to", "streamtape.net", "strtape.tech", "streamtapeadblock"]
+
+
+def extract_streamtape(embed_url: str) -> Optional[str]:
+    """Extract mp4 URL from Streamtape."""
+    try:
+        r = requests.get(embed_url, headers={"User-Agent": UA, "Referer": "https://tioanime.com/"}, timeout=15)
+        if r.status_code != 200:
+            return None
+        # Look for target url in JS
+        m = re.search(r"document\.getElementById\(['\"]videolink['\"]\)\.innerHTML\s*=\s*['\"]?([^'\"]+)['\"]?", r.text)
+        if m:
+            return f"https://streamtape.com/get_video?id={m.group(1)}"
+        # Or directly look for mp4
+        mp4 = re.findall(r"https?://[^\s\"'<>]+\.mp4[^\s\"'<>]*", r.text)
+        if mp4:
+            return mp4[0]
+        # Or sources array
+        m = re.search(r'sources\s*:\s*\[\{[^}]*src\s*:\s*["\']([^"\']+)["\']', r.text)
+        if m:
+            return m.group(1)
+        return None
+    except Exception as e:
+        log.warning(f"streamtape extract failed for {embed_url}: {e}")
+        return None
+
+
+# ============================================================
+# Vidoza extractor
+# ============================================================
+VIDOZA_DOMAINS = ["vidoza.net", "vidoza.co", "vidoza.com"]
+
+
+def extract_vidoza(embed_url: str) -> Optional[str]:
+    """Extract mp4 URL from Vidoza (looks for <source src=...>)."""
+    try:
+        r = requests.get(embed_url, headers={"User-Agent": UA, "Referer": "https://tioanime.com/"}, timeout=15)
+        if r.status_code != 200:
+            return None
+        # Look for source tag with src
+        for m in re.finditer(r'<source[^>]+src=["\']([^"\']+)["\']', r.text):
+            return m.group(1)
+        # Or sources array
+        m = re.search(r'sources\s*:\s*\[\{[^}]*["\']src["\']\s*:\s*["\']([^"\']+)["\']', r.text)
+        if m:
+            return m.group(1)
+        # Or src: in JS
+        m = re.search(r'src\s*:\s*["\']([^"\']+\.(?:mp4|m3u8)[^"\']*)["\']', r.text)
+        if m:
+            return m.group(1)
+        return None
+    except Exception as e:
+        log.warning(f"vidoza extract failed for {embed_url}: {e}")
+        return None
+
+
+# ============================================================
+# YourUpload extractor
+# ============================================================
+YOURUPLOAD_DOMAINS = ["yourupload.com", "yucache.net"]
+
+
+def extract_yourupload(embed_url: str) -> Optional[str]:
+    """Extract mp4 URL from YourUpload (looks for file:'...mp4')."""
+    try:
+        r = requests.get(embed_url, headers={"User-Agent": UA, "Referer": "https://tioanime.com/"}, timeout=15)
+        if r.status_code != 200:
+            return None
+        # Pattern from APK: file:\s*'([^']+\.(?:m3u8|mp4))'
+        m = re.search(r"file\s*:\s*['\"]([^'\"]+\.(?:m3u8|mp4)[^'\"]*)['\"]", r.text)
+        if m:
+            return m.group(1)
+        # Or source tag
+        for m in re.finditer(r'<source[^>]+src=["\']([^"\']+)["\']', r.text):
+            return m.group(1)
+        # Or sources
+        m = re.search(r'sources\s*:\s*\[\{[^}]*["\']file["\']\s*:\s*["\']([^"\']+)["\']', r.text)
+        if m:
+            return m.group(1)
+        return None
+    except Exception as e:
+        log.warning(f"yourupload extract failed for {embed_url}: {e}")
+        return None
+
+
+# ============================================================
+# Doodstream extractor (uses a hash table to decode video URL)
+# ============================================================
+DOODSTREAM_DOMAINS = ["doodstream.com", "dood.la", "dood.li", "dood.so", "dood.ws", "dood.yt",
+                      "dood.pm", "dood.re", "dood.wf", "vide0.net"]
+
+
+def extract_doodstream(embed_url: str) -> Optional[str]:
+    """Extract mp4 URL from Doodstream."""
+    try:
+        r = requests.get(embed_url, headers={"User-Agent": UA, "Referer": "https://fanpelis.to/"}, timeout=15)
+        if r.status_code != 200:
+            return None
+        # Find the download page token (md5 hash in function call)
+        # Pattern: pass_md5/XXXX/XXXX
+        m = re.search(r"'(/pass_md5/[^']+)'", r.text)
+        if m:
+            token_path = m.group(1)
+            base = re.match(r"https?://[^/]+", embed_url).group(0)
+            token_url = base + token_path
+            r2 = requests.get(token_url, headers={"User-Agent": UA, "Referer": embed_url}, timeout=15)
+            if r2.status_code == 200:
+                # The token response is the partial URL, we need to add random chars + the video ID
+                token = r2.text
+                # Find video_id and length
+                m2 = re.search(r"'(\d{10})'", r.text)
+                if m2:
+                    video_id = m2.group(1)
+                    import random, string
+                    random_str = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+                    final_url = f"{token}{random_str}?token={video_id}&expiry="
+                    return final_url
+        # Fallback: look for direct mp4
+        mp4 = re.findall(r"https?://[^\s\"'<>]+\.mp4[^\s\"'<>]*", r.text)
+        if mp4:
+            return mp4[0]
+        return None
+    except Exception as e:
+        log.warning(f"doodstream extract failed for {embed_url}: {e}")
+        return None
+
+
+# ============================================================
+# Goodstream extractor
+# ============================================================
+GOODSTREAM_DOMAINS = ["goodstream.one"]
+
+
+def extract_goodstream(embed_url: str) -> Optional[str]:
+    """Extract playable URL from Goodstream."""
+    try:
+        r = requests.get(embed_url, headers={"User-Agent": UA, "Referer": "https://fanpelis.to/"}, timeout=15)
+        if r.status_code != 200:
+            return None
+        # Look for sources or file
+        m = re.search(r'sources\s*:\s*\[\{[^}]*["\']file["\']\s*:\s*["\']([^"\']+)["\']', r.text)
+        if m:
+            return m.group(1)
+        m = re.search(r'file\s*:\s*["\']([^"\']+\.(?:mp4|m3u8)[^"\']*)["\']', r.text)
+        if m:
+            return m.group(1)
+        # Packed JS?
+        for s in re.findall(r"<script[^>]*>(.*?)</script>", r.text, re.DOTALL):
+            if "function(p,a,c,k,e,d)" in s:
+                unpacked = _unpack_dean_edwards(s)
+                if unpacked:
+                    mp4 = re.findall(r"https?://[^\s\"'<>]+\.mp4[^\s\"'<>]*", unpacked)
+                    if mp4:
+                        return mp4[0]
+                    m3u8 = re.findall(r"https?://[^\s\"'<>]+\.m3u8[^\s\"'<>]*", unpacked)
+                    if m3u8:
+                        return m3u8[0]
+                    # Look for file:
+                    m2 = re.search(r'file\s*:\s*["\']([^"\']+)["\']', unpacked)
+                    if m2:
+                        return m2.group(1)
+        return None
+    except Exception as e:
+        log.warning(f"goodstream extract failed for {embed_url}: {e}")
+        return None
+
+
+# ============================================================
+# Veev extractor
+# ============================================================
+VEEV_DOMAINS = ["veev.to"]
+
+
+def extract_veev(embed_url: str) -> Optional[str]:
+    """Extract mp4 URL from Veev.to."""
+    try:
+        r = requests.get(embed_url, headers={"User-Agent": UA, "Referer": "https://fanpelis.to/"}, timeout=15)
+        if r.status_code != 200:
+            return None
+        # Look for direct mp4 or m3u8
+        mp4 = re.findall(r"https?://[^\s\"'<>]+\.mp4[^\s\"'<>]*", r.text)
+        if mp4:
+            return mp4[0]
+        m3u8 = re.findall(r"https?://[^\s\"'<>]+\.m3u8[^\s\"'<>]*", r.text)
+        if m3u8:
+            return m3u8[0]
+        # Sources
+        m = re.search(r'sources\s*:\s*\[\{[^}]*["\']file["\']\s*:\s*["\']([^"\']+)["\']', r.text)
+        if m:
+            return m.group(1)
+        # Packed JS?
+        for s in re.findall(r"<script[^>]*>(.*?)</script>", r.text, re.DOTALL):
+            if "function(p,a,c,k,e,d)" in s:
+                unpacked = _unpack_dean_edwards(s)
+                if unpacked:
+                    mp4 = re.findall(r"https?://[^\s\"'<>]+\.mp4[^\s\"'<>]*", unpacked)
+                    if mp4:
+                        return mp4[0]
+                    m3u8 = re.findall(r"https?://[^\s\"'<>]+\.m3u8[^\s\"'<>]*", unpacked)
+                    if m3u8:
+                        return m3u8[0]
+        return None
+    except Exception as e:
+        log.warning(f"veev extract failed for {embed_url}: {e}")
+        return None
+
+
+# ============================================================
+# Vimeos / LaMovie extractor (similar to goodstream)
+# ============================================================
+VIMEOS_DOMAINS = ["vimeos.net", "lamovie.link"]
+
+
+def extract_vimeos(embed_url: str) -> Optional[str]:
+    """Extract playable URL from Vimeos/LaMovie."""
+    try:
+        r = requests.get(embed_url, headers={"User-Agent": UA, "Referer": "https://fanpelis.to/"}, timeout=15)
+        if r.status_code != 200:
+            return None
+        # Look for direct URLs
+        mp4 = re.findall(r"https?://[^\s\"'<>]+\.mp4[^\s\"'<>]*", r.text)
+        if mp4:
+            return mp4[0]
+        m3u8 = re.findall(r"https?://[^\s\"'<>]+\.m3u8[^\s\"'<>]*", r.text)
+        if m3u8:
+            return m3u8[0]
+        # Sources
+        m = re.search(r'sources\s*:\s*\[\{[^}]*["\']file["\']\s*:\s*["\']([^"\']+)["\']', r.text)
+        if m:
+            return m.group(1)
+        # Packed JS?
+        for s in re.findall(r"<script[^>]*>(.*?)</script>", r.text, re.DOTALL):
+            if "function(p,a,c,k,e,d)" in s:
+                unpacked = _unpack_dean_edwards(s)
+                if unpacked:
+                    mp4 = re.findall(r"https?://[^\s\"'<>]+\.mp4[^\s\"'<>]*", unpacked)
+                    if mp4:
+                        return mp4[0]
+                    m3u8 = re.findall(r"https?://[^\s\"'<>]+\.m3u8[^\s\"'<>]*", unpacked)
+                    if m3u8:
+                        return m3u8[0]
+        return None
+    except Exception as e:
+        log.warning(f"vimeos extract failed for {embed_url}: {e}")
+        return None
+
+
+# ============================================================
 # Dispatcher
 # ============================================================
 _EXTRACTORS = [
@@ -378,6 +628,13 @@ _EXTRACTORS = [
     ("voe", VOE_DOMAINS, extract_voe),
     ("hexload", HEXLOAD_DOMAINS, extract_hexload),
     ("mega", ["mega.nz"], extract_mega),
+    ("streamtape", STREAMTAPE_DOMAINS, extract_streamtape),
+    ("vidoza", VIDOZA_DOMAINS, extract_vidoza),
+    ("yourupload", YOURUPLOAD_DOMAINS, extract_yourupload),
+    ("doodstream", DOODSTREAM_DOMAINS, extract_doodstream),
+    ("goodstream", GOODSTREAM_DOMAINS, extract_goodstream),
+    ("veev", VEEV_DOMAINS, extract_veev),
+    ("vimeos", VIMEOS_DOMAINS, extract_vimeos),
 ]
 
 
@@ -406,8 +663,11 @@ def extract_stream(embed_url: str, host: str = "") -> Optional[str]:
         if any(d in url_lower for d in domains):
             return fn(embed_url)
 
-    # Fallback: try vidhide first (most common in flixlatam)
-    for fn in (extract_vidhide, extract_mixdrop, extract_mp4upload, extract_streamwish, extract_voe, extract_hexload):
+    # Fallback: try all extractors
+    for fn in (extract_vidhide, extract_mixdrop, extract_mp4upload, extract_streamtape,
+               extract_vidoza, extract_yourupload, extract_veev, extract_vimeos,
+               extract_streamwish, extract_voe, extract_hexload, extract_goodstream,
+               extract_doodstream):
         url = fn(embed_url)
         if url:
             return url
