@@ -8,7 +8,7 @@ Exposes Stremio addon endpoints:
     GET /meta/:type/:id.json                  (metadata)
     GET /stream/:type/:id.json                (stream resolution)
 
-Plus a Gradio UI at /ui for manual testing.
+Plus a simple HTML UI at /ui for manual testing (no Gradio, to keep startup fast).
 
 Stremio ID conventions:
     Movies:  flixlatam:{slug}      e.g. flixlatam:sultana-hUFIlu
@@ -29,7 +29,6 @@ import requests
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
-import gradio as gr
 import uvicorn
 
 # Local imports - make sure 'providers' and 'utils' are importable
@@ -353,121 +352,90 @@ def home():
 
 
 # ============================================================
-# Gradio UI for manual testing
+# Simple HTML UI for manual testing (no Gradio, lightweight)
 # ============================================================
-def _ui_resolve_movie(imdb_or_slug: str) -> str:
-    if not imdb_or_slug.strip():
-        return "Pon un IMDb ID (tt0816692) o un slug flixlatam (sultana-hUFIlu)"
-    s = imdb_or_slug.strip()
-    if s.startswith("flixlatam:"):
-        s = s[len("flixlatam:"):]
-    if s.startswith("tt"):
-        streams = flixlatam.resolve_movie_streams(s)
-    else:
-        info = flixlatam.get_movie_detail(s)
-        if not info:
-            return f"No se encontro la pelicula con slug={s}"
-        if not info.get("imdb_id"):
-            return f"Pelicula encontrada pero sin IMDb ID: {info.get('name')}"
-        streams = flixlatam.resolve_movie_streams(info["imdb_id"])
-    return _format_streams(streams)
+@app.get("/ui", response_class=HTMLResponse)
+def ui():
+    return """<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>StreamFlix Addon</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;background:#0f0f0f;color:#eee;line-height:1.5}
+h1{color:#10b981;border-bottom:1px solid #333;padding-bottom:.5rem}
+h2{color:#3291ff;margin-top:2rem}
+input,button,select{padding:.6rem;margin:.2rem;background:#1a1a1a;border:1px solid #333;color:#eee;border-radius:4px;font-size:14px}
+button{background:#10b981;color:#000;cursor:pointer;font-weight:600}
+button:hover{background:#0e9c72}
+pre{background:#1a1a1a;padding:1rem;border-radius:4px;overflow-x:auto;border:1px solid #333;max-height:400px}
+a{color:#3291ff}
+code{background:#1a1a1a;padding:2px 6px;border-radius:3px;color:#10b981}
+.status{padding:.5rem 1rem;background:#1a2a1a;border-left:3px solid #10b981;margin:1rem 0;border-radius:4px}
+</style>
+</head>
+<body>
+<h1>StreamFlix Reborn — Stremio Addon</h1>
+<div class="status">
+<strong>Addon URL para Stremio:</strong><br>
+<code id="manifest-url"></code>
+</div>
 
+<h2>Resolver Película</h2>
+<p>IMDb ID (ej: tt41228546) o slug FlixLatam (ej: sultana-hUFIlu)</p>
+<input id="movie-input" placeholder="tt41228546" style="width:300px">
+<button onclick="resolveMovie()">Resolver</button>
+<pre id="movie-result">Resultado aparecerá aquí...</pre>
 
-def _ui_resolve_episode(imdb_or_slug: str, season: int, episode: int) -> str:
-    s = imdb_or_slug.strip()
-    if not s:
-        return "Pon un IMDb ID (tt45403168) o un slug flixlatam (en-coma-BVwton)"
-    if s.startswith("flixlatam:"):
-        s = s[len("flixlatam:"):]
-    if s.startswith("tt"):
-        streams = flixlatam.resolve_episode_streams(s, int(season), int(episode))
-    else:
-        ep_imdb = flixlatam.get_episode_imdb_id(s, int(season), int(episode))
-        if not ep_imdb:
-            return f"No se encontro el episodio T{season}E{episode} para slug={s}"
-        m = re.match(r"(tt\d+)", ep_imdb)
-        if m:
-            streams = flixlatam.resolve_episode_streams(
-                m.group(1), int(season), int(episode)
-            )
-        else:
-            streams = []
-    return _format_streams(streams)
+<h2>Resolver Episodio</h2>
+<p>IMDb ID (ej: tt45403168) o slug Latanime (ej: la-mision-de-la-familia-yozakura-s2-castellano)</p>
+<input id="ep-id" placeholder="tt45403168" style="width:300px">
+<input id="ep-s" type="number" value="1" style="width:60px" placeholder="T">
+<input id="ep-e" type="number" value="1" style="width:60px" placeholder="E">
+<button onclick="resolveEpisode()">Resolver</button>
+<pre id="ep-result">Resultado aparecerá aquí...</pre>
 
+<h2>Explorar Catálogo</h2>
+<select id="cat-type">
+<option value="movie/flixlatam_movies">FlixLatam Películas</option>
+<option value="movie/flixlatam_popular">FlixLatam Populares</option>
+<option value="series/flixlatam_series">FlixLatam Series</option>
+<option value="series/latanime_catalog">Latanime Anime</option>
+</select>
+<input id="cat-page" type="number" value="1" style="width:60px" placeholder="Pág">
+<button onclick="browseCatalog()">Cargar</button>
+<pre id="cat-result">Resultado aparecerá aquí...</pre>
 
-def _format_streams(streams: list[dict]) -> str:
-    if not streams:
-        return "Sin streams disponibles"
-    out = [f"Se resolvieron {len(streams)} streams:\n"]
-    for s in streams:
-        out.append(f"  • {s['name']}")
-        out.append(f"    {s['url']}\n")
-    return "\n".join(out)
+<script>
+const MANIFEST = location.origin + '/manifest.json';
+document.getElementById('manifest-url').textContent = MANIFEST;
 
+async function resolveMovie() {
+  const v = document.getElementById('movie-input').value.trim();
+  const r = await fetch(`/stream/movie/${v}.json`);
+  const d = await r.json();
+  document.getElementById('movie-result').textContent = JSON.stringify(d, null, 2);
+}
 
-def _ui_browse(page: int, kind: str) -> str:
-    page = max(1, int(page))
-    if kind == "Peliculas":
-        items = flixlatam.get_movies(page=page)
-    elif kind == "Series":
-        items = flixlatam.get_series(page=page)
-    else:
-        items = flixlatam.get_popular_movies(page=page)
-    if not items:
-        return f"Sin resultados en pagina {page}"
-    out = [f"Pagina {page} — {len(items)} items:\n"]
-    for it in items[:24]:
-        out.append(f"  • [{it['type']}] {it['name']}")
-        out.append(f"    slug: {it['slug']}")
-        if it.get("poster"):
-            out.append(f"    poster: {it['poster']}")
-        out.append("")
-    return "\n".join(out)
+async function resolveEpisode() {
+  const id = document.getElementById('ep-id').value.trim();
+  const s = document.getElementById('ep-s').value;
+  const e = document.getElementById('ep-e').value;
+  const r = await fetch(`/stream/series/${id}:${s}:${e}.json`);
+  const d = await r.json();
+  document.getElementById('ep-result').textContent = JSON.stringify(d, null, 2);
+}
 
-
-with gr.Blocks(title="StreamFlix Stremio Addon") as demo:
-    gr.Markdown(f"""
-    # StreamFlix Reborn — Stremio Addon
-
-    **URL del addon para Stremio:**
-    ```
-    <tu-url>/manifest.json
-    ```
-
-    • **FlareSolverr:** {'✅ activo' if flaresolverr_enabled() else '❌ desactivado (solo FlixLatam)'}
-    • **TMDB API key:** {'✅' if TMDB_API_KEY else '❌ no configurada'}
-    """)
-
-    with gr.Tab("Resolver Película"):
-        gr.Markdown("Pon un IMDb ID (`tt0816692`) o un slug FlixLatam (`sultana-hUFIlu`).")
-        in_movie = gr.Textbox(label="IMDb ID o slug", placeholder="tt41228546")
-        btn_movie = gr.Button("Resolver", variant="primary")
-        out_movie = gr.Textbox(label="Streams", lines=12)
-        btn_movie.click(_ui_resolve_movie, in_movie, out_movie)
-
-    with gr.Tab("Resolver Episodio"):
-        with gr.Row():
-            in_ep_id = gr.Textbox(label="IMDb ID o slug", placeholder="tt45403168")
-            in_ep_s = gr.Number(label="T", value=1, precision=0)
-            in_ep_e = gr.Number(label="E", value=1, precision=0)
-        btn_ep = gr.Button("Resolver", variant="primary")
-        out_ep = gr.Textbox(label="Streams", lines=12)
-        btn_ep.click(_ui_resolve_episode, [in_ep_id, in_ep_s, in_ep_e], out_ep)
-
-    with gr.Tab("Explorar Catálogo"):
-        with gr.Row():
-            in_page = gr.Number(label="Página", value=1, precision=0)
-            in_kind = gr.Radio(
-                choices=["Peliculas", "Series", "Populares"],
-                value="Peliculas",
-                label="Tipo",
-            )
-        btn_browse = gr.Button("Cargar", variant="primary")
-        out_browse = gr.Textbox(label="Catálogo", lines=20)
-        btn_browse.click(_ui_browse, [in_page, in_kind], out_browse)
-
-
-app = gr.mount_gradio_app(app, demo, path="/ui")
+async function browseCatalog() {
+  const t = document.getElementById('cat-type').value;
+  const p = document.getElementById('cat-page').value;
+  const r = await fetch(`/catalog/${t}.json?page=${p}`);
+  const d = await r.json();
+  document.getElementById('cat-result').textContent = JSON.stringify(d, null, 2).slice(0, 5000);
+}
+</script>
+</body>
+</html>"""
 
 
 # ============================================================
