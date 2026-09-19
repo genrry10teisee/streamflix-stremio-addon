@@ -576,17 +576,14 @@ def stream(item_type: str, item_id: str, request: Request):
 # ============================================================
 @app.get("/")
 def home():
+    # Public endpoint (no token required) — used by Render's health check.
+    # Does NOT expose any streaming data, just service info.
     return {
         "status": "online",
         "addon": ADDON_NAME,
         "version": ADDON_VERSION,
-        "manifest": "/manifest.json",
-        "ui": "/ui",
-        "stats": "/stats",
-        "refresh": "/refresh/{type}/{id} (POST or GET to invalidate cache)",
+        "manifest": "/manifest.json" + ("?token=YOUR_TOKEN" if ADDON_TOKEN else ""),
         "auth_required": bool(ADDON_TOKEN),
-        "flaresolverr_enabled": flaresolverr_enabled(),
-        "tmdb_configured": bool(TMDB_API_KEY),
     }
 
 
