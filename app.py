@@ -57,8 +57,43 @@ log = logging.getLogger("streamflix")
 # ============================================================
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
 ADDON_NAME = os.environ.get("ADDON_NAME", "StreamFlix Reborn (FlixLatam)")
-ADDON_VERSION = "1.0.0"
+ADDON_VERSION = "2.1.0"
 ADDON_ID = "community.streamflix.flixlatam"
+
+# Authentication: set ADDON_TOKEN to require ?token=... in all requests.
+# Stremio passes the query string from the install URL to all subsequent requests.
+ADDON_TOKEN = os.environ.get("ADDON_TOKEN", "")
+
+
+# ============================================================
+# Token authentication helpers
+# ============================================================
+def _check_token(request: Request) -> bool:
+    """Return True if the request has the correct token (or if no token is required)."""
+    if not ADDON_TOKEN:
+        return True  # No token required, addon is public
+    # Check query parameter (?token=...)
+    token = request.query_params.get("token", "")
+    # Also check Authorization header (Bearer token)
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:]
+    # Also check X-Addon-Token header
+    if not token:
+        token = request.headers.get("X-Addon-Token", "")
+    return token == ADDON_TOKEN
+
+
+def _require_token(request: Request):
+    """Return a 401 JSONResponse if the token is missing/invalid, else None."""
+    if not _check_token(request):
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Unauthorized. Add ?token=YOUR_TOKEN to the URL."},
+        )
+    return None
+
 
 # ============================================================
 # FastAPI app
@@ -77,7 +112,10 @@ app.add_middleware(
 # Stremio addon: manifest
 # ============================================================
 @app.get("/manifest.json")
-def manifest():
+def manifest(request: Request):
+    err = _require_token(request)
+    if err:
+        return err
     catalogs = [
         {
             "type": "movie",
@@ -176,6 +214,9 @@ def manifest():
 # ============================================================
 @app.get("/catalog/{item_type}/{cat_id}.json")
 def catalog(item_type: str, cat_id: str, request: Request):
+    err = _require_token(request)
+    if err:
+        return err
     page = int(request.query_params.get("page", 1) or 1)
     search = request.query_params.get("search", "").strip()
 
@@ -251,7 +292,10 @@ def _search_flixlatam(query: str, item_type: str) -> list[dict]:
 # Stremio addon: meta
 # ============================================================
 @app.get("/meta/{item_type}/{item_id}.json")
-def meta(item_type: str, item_id: str):
+def meta(item_type: str, item_id: str, request: Request):
+    err = _require_token(request)
+    if err:
+        return err
     log.info(f"meta type={item_type} id={item_id}")
 
     # item_id can be:
@@ -438,7 +482,10 @@ def _minimal_imdb_meta(item_type: str, imdb_id: str) -> dict:
 # Stremio addon: stream
 # ============================================================
 @app.get("/stream/{item_type}/{item_id}.json")
-def stream(item_type: str, item_id: str):
+def stream(item_type: str, item_id: str, request: Request):
+    err = _require_token(request)
+    if err:
+        return err
     log.info(f"stream type={item_type} id={item_id}")
 
     # Strip .json if present
@@ -535,8 +582,71 @@ def home():
         "version": ADDON_VERSION,
         "manifest": "/manifest.json",
         "ui": "/ui",
+        "stats": "/stats",
+        "refresh": "/refresh/{type}/{id} (POST or GET to invalidate cache)",
+        "auth_required": bool(ADDON_TOKEN),
         "flaresolverr_enabled": flaresolverr_enabled(),
         "tmdb_configured": bool(TMDB_API_KEY),
+    }
+
+
+@app.get("/stats")
+def stats(request: Request):
+    """Show cache statistics (requires token if configured)."""
+    err = _require_token(request)
+    if err:
+        return err
+    return {
+        "cache": autoscrape.get_cache_stats(),
+        "providers": ["FlixLatam", "Latanime", "SeriesFlix", "TioAnime", "Fanpelis"],
+        "auth_required": bool(ADDON_TOKEN),
+    }
+
+
+@app.api_route("/refresh/{item_type}/{item_id}", methods=["GET", "POST"])
+@app.api_route("/refresh/{item_type}/{item_id}.json", methods=["GET", "POST"])
+def refresh_cache(item_type: str, item_id: str, request: Request):
+    """
+    Invalidate the cache for a specific item and re-scrape.
+    
+    Usage:
+      GET /refresh/movie/tt0816692?token=success
+      → returns fresh streams after re-scraping
+    
+    This is the "refresh button" — when you want to re-search for a movie
+    that might have new streams since the last scrape.
+    """
+    err = _require_token(request)
+    if err:
+        return err
+    
+    item_id_clean = item_id.replace(".json", "")
+    
+    # Invalidate cache
+    was_cached = autoscrape.invalidate_cache(item_type, item_id_clean)
+    
+    # Re-scrape based on item type
+    if item_type == "movie" and item_id_clean.startswith("tt"):
+        streams = autoscrape.find_movie_streams(item_id_clean)
+    elif item_type == "series" and ":" in item_id_clean:
+        parts = item_id_clean.split(":")
+        if len(parts) >= 3 and parts[0].startswith("tt"):
+            imdb_id = parts[0]
+            season = int(parts[1])
+            episode = int(parts[2])
+            streams = autoscrape.find_episode_streams(imdb_id, season, episode)
+        else:
+            streams = []
+    else:
+        streams = []
+    
+    return {
+        "refreshed": True,
+        "was_cached": was_cached,
+        "item_type": item_type,
+        "item_id": item_id_clean,
+        "streams_found": len(streams),
+        "streams": streams,
     }
 
 
