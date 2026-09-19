@@ -11,7 +11,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Render injects PORT env var. Default to 8000 for local runs.
 ENV PORT=8000
 EXPOSE 8000
 
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Use shell form so ${PORT} is interpolated at runtime (not build time)
+CMD uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}
