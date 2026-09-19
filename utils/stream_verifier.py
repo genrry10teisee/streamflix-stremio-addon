@@ -49,27 +49,30 @@ def is_blacklisted(url: str) -> bool:
 
 def verify_stream(url: str) -> bool:
     """
-    Verify that a stream URL actually works.
+    Verify that a stream URL actually works. STRICT mode.
     
-    Returns True if the URL is valid and playable, False otherwise.
+    Returns True ONLY if the URL is confirmed working:
+      - .m3u8: GET returns 200 AND response contains #EXTM3U
+      - .mp4/other: HEAD or GET returns 200
     
-    Strategy:
-      - Always filter out blacklisted URLs (test videos, etc.)
-      - For .m3u8: try GET and check for #EXTM3U, but if request fails
-        (timeout, 403), still return True (many CDNs block server-side requests
-        but work fine in Stremio's player)
-      - For .mp4: try HEAD, but if it fails, still return True (same reason)
-      - Only return False for clearly broken URLs (connection refused, DNS error, etc.)
+    Returns False for:
+      - Blacklisted URLs (test videos, Big Buck Bunny, etc.)
+      - DNS errors, connection refused
+      - Timeouts (too slow = won't work in Stremio)
+      - HTTP 403/404/500 (broken or blocked)
+      - Empty responses
+    
+    "chau chau y con otro" — if it doesn't pass, it's gone.
     """
     if not url or not url.startswith("http"):
         return False
     
     if is_blacklisted(url):
-        log.info(f"Blacklisted (test video): {url[:80]}")
+        log.info(f"✗ Blacklisted (test video): {url[:80]}")
         return False
     
     try:
-        # For m3u8, try to verify but don't be too aggressive
+        # For m3u8: must get 200 + #EXTM3U
         if ".m3u8" in url:
             r = requests.get(
                 url,
@@ -77,23 +80,23 @@ def verify_stream(url: str) -> bool:
                 stream=True,
                 allow_redirects=True,
             )
-            if r.status_code == 200:
-                first_bytes = r.raw.read(100, decode_content=True)
-                r.close()
-                if first_bytes:
-                    content_start = first_bytes.decode("utf-8", errors="ignore")
-                    if "#EXTM3U" in content_start:
-                        return True
-                    # Some m3u8 don't start with #EXTM3U immediately (BOM, comments)
-                    # If we got 200 with content, accept it
-                    log.debug(f"m3u8 {url[:60]} -> 200 but no #EXTM3U in first 100 bytes, accepting anyway")
-                    return True
-            # 403/401 might mean the CDN blocks server-side but works in player
-            # Don't filter these out — Stremio's player can handle them
-            log.debug(f"m3u8 {url[:60]} -> HTTP {r.status_code}, accepting (CDN may block server-side)")
+            if r.status_code != 200:
+                log.info(f"✗ m3u8 HTTP {r.status_code}: {url[:60]}")
+                return False
+            # Read first 500 bytes to check for #EXTM3U
+            first_bytes = r.raw.read(500, decode_content=True)
+            r.close()
+            if not first_bytes:
+                log.info(f"✗ m3u8 empty response: {url[:60]}")
+                return False
+            content_start = first_bytes.decode("utf-8", errors="ignore")
+            if "#EXTM3U" not in content_start:
+                log.info(f"✗ m3u8 no #EXTM3U marker: {url[:60]}")
+                return False
+            log.debug(f"✓ m3u8 valid: {url[:60]}")
             return True
         
-        # For mp4 and other, do a HEAD request
+        # For mp4 and other: HEAD first, then GET if needed
         else:
             r = requests.head(
                 url,
@@ -101,9 +104,14 @@ def verify_stream(url: str) -> bool:
                 allow_redirects=True,
             )
             if r.status_code == 200:
+                # Check content-length if available
+                cl = r.headers.get("content-length", "")
+                if cl and int(cl) < 10000:
+                    log.info(f"✗ Too small ({cl}b): {url[:60]}")
+                    return False
                 return True
-            # 403/405 might just mean HEAD not supported, try GET
-            if r.status_code in (403, 405):
+            # HEAD not supported? Try GET
+            if r.status_code in (403, 405, 501):
                 r = requests.get(
                     url,
                     timeout=_VERIFY_TIMEOUT,
@@ -111,25 +119,22 @@ def verify_stream(url: str) -> bool:
                     allow_redirects=True,
                 )
                 if r.status_code == 200:
+                    cl = r.headers.get("content-length", "")
+                    if cl and int(cl) < 10000:
+                        log.info(f"✗ Too small ({cl}b): {url[:60]}")
+                        return False
                     return True
-            # If we can't verify, accept anyway (better to show and let Stremio try)
-            log.debug(f"{url[:60]} -> HTTP {r.status_code}, accepting (may work in player)")
-            return True
-    except requests.exceptions.Timeout:
-        # Timeout doesn't mean the URL is bad — the CDN might be slow
-        log.debug(f"Timeout verifying {url[:60]}, accepting anyway")
-        return True
-    except requests.exceptions.ConnectionError as e:
-        # DNS errors, connection refused = truly broken
-        if "Name or service not known" in str(e) or "Connection refused" in str(e):
-            log.info(f"Broken URL (DNS/connection): {url[:60]}")
+            log.info(f"✗ HTTP {r.status_code}: {url[:60]}")
             return False
-        # Other connection errors might be temporary
-        log.debug(f"Connection error for {url[:60]}: {e}, accepting")
-        return True
+    except requests.exceptions.Timeout:
+        log.info(f"✗ Timeout: {url[:60]}")
+        return False
+    except requests.exceptions.ConnectionError as e:
+        log.info(f"✗ Connection error: {url[:60]} ({str(e)[:50]})")
+        return False
     except Exception as e:
-        log.debug(f"Verify error for {url[:60]}: {e}, accepting")
-        return True
+        log.info(f"✗ Verify error: {url[:60]} ({str(e)[:50]})")
+        return False
 
 
 def verify_streams_parallel(streams: list[dict], max_workers: int = 8) -> list[dict]:
