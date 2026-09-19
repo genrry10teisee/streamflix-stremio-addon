@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from providers import flixlatam
 from providers import latanime
+from providers import seriesflix
 from utils.flaresolverr import is_enabled as flaresolverr_enabled
 
 # ============================================================
@@ -111,17 +112,27 @@ def manifest():
                 {"name": "page", "isRequired": False, "options": [1, 2, 3, 4, 5]},
             ],
         },
+        {
+            "type": "series",
+            "id": "seriesflix_catalog",
+            "name": "SeriesFlix · Series HD",
+            "extraSupported": ["search", "page"],
+            "extra": [
+                {"name": "search", "isRequired": False},
+                {"name": "page", "isRequired": False, "options": [1, 2, 3, 4, 5]},
+            ],
+        },
     ]
     return {
         "id": ADDON_ID,
         "version": ADDON_VERSION,
         "name": ADDON_NAME,
-        "description": "Streaming en Español y Latino desde FlixLatam + Latanime. "
+        "description": "Streaming en Español y Latino desde FlixLatam + Latanime + SeriesFlix. "
                        "Catálogos completos + resolutor de streams.",
         "logo": "https://flixlatam.com/images/logo.png",
         "resources": ["catalog", "meta", "stream"],
         "types": ["movie", "series"],
-        "idPrefixes": ["tt", "flixlatam:", "latanime:"],
+        "idPrefixes": ["tt", "flixlatam:", "latanime:", "seriesflix:"],
         "catalogs": catalogs,
         "behaviorHints": {"configurable": False},
     }
@@ -156,6 +167,11 @@ def catalog(item_type: str, cat_id: str, request: Request):
                 items = latanime.search_anime(search)
             else:
                 items = latanime.get_anime_list(page=page)
+        elif cat_id == "seriesflix_catalog":
+            if search:
+                items = seriesflix.search_series(search)
+            else:
+                items = seriesflix.get_series_list(page=page)
     except Exception as e:
         log.exception(f"catalog error: {e}")
 
@@ -253,6 +269,36 @@ def meta(item_type: str, item_id: str):
         m["videos"] = videos
         return {"meta": m}
 
+    elif item_id.startswith("seriesflix:"):
+        slug = item_id[len("seriesflix:"):]
+        info = seriesflix.get_series_detail(slug)
+        if not info:
+            return JSONResponse(status_code=404, content={"error": "not found"})
+        m = {
+            "id": f"seriesflix:{slug}",
+            "type": "series",
+            "name": info.get("name", slug),
+            "poster": info.get("poster"),
+            "description": info.get("description", ""),
+        }
+        # Build videos list from seasons (fetch episodes for each)
+        videos = []
+        for season in info.get("seasons", []):
+            try:
+                episodes = seriesflix.get_season_episodes(slug, season)
+            except Exception as e:
+                log.warning(f"get_season_episodes failed: {e}")
+                episodes = []
+            for ep in episodes:
+                videos.append({
+                    "id": f"seriesflix:{slug}:{season}:{ep}",
+                    "title": f"T{season}E{ep}",
+                    "season": season,
+                    "episode": ep,
+                })
+        m["videos"] = videos
+        return {"meta": m}
+
     elif item_id.startswith("tt"):
         return _minimal_imdb_meta(item_type, item_id)
 
@@ -311,12 +357,19 @@ def stream(item_type: str, item_id: str):
     # Latanime items: latanime:{slug}:{season}:{episode}
     elif "latanime:" in item_id and item_type == "series":
         parts = item_id.split(":")
-        # parts[0] == "latanime", parts[1] == slug, parts[2]=season, parts[3]=episode
         if len(parts) >= 4:
             slug = parts[1]
-            # season is parts[2], episode is parts[3]
             episode = int(parts[3])
             streams = latanime.get_episode_streams(slug, episode)
+
+    # SeriesFlix items: seriesflix:{slug}:{season}:{episode}
+    elif "seriesflix:" in item_id and item_type == "series":
+        parts = item_id.split(":")
+        if len(parts) >= 4:
+            slug = parts[1]
+            season = int(parts[2])
+            episode = int(parts[3])
+            streams = seriesflix.resolve_episode_streams(slug, season, episode)
 
     # Plain IMDb IDs
     elif item_id.startswith("tt"):
