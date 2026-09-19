@@ -24,6 +24,9 @@ from typing import Optional
 
 import requests
 
+# Import the stream verifier for filtering out dead/test streams
+from utils.stream_verifier import verify_streams_parallel, is_blacklisted
+
 log = logging.getLogger(__name__)
 
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
@@ -276,6 +279,28 @@ def _try_latanime(title: str, episode: int) -> list[dict]:
     return []
 
 
+def _try_cinecalidad_movie(title: str) -> list[dict]:
+    """Search CineCalidad by title."""
+    try:
+        from providers import cinecalidad
+        results = cinecalidad.search_movies(title)
+        if not results:
+            # Try with just the first word (some titles are long)
+            short_title = title.split(":")[0].strip()
+            if short_title != title:
+                results = cinecalidad.search_movies(short_title)
+        if not results:
+            return []
+        first = results[0]
+        slug = first.get("slug")
+        if not slug:
+            return []
+        return cinecalidad.resolve_movie_streams(slug)
+    except Exception as e:
+        log.warning(f"CineCalidad movie search failed: {e}")
+    return []
+
+
 # ============================================================
 # Aggregator
 # ============================================================
@@ -307,6 +332,7 @@ def find_movie_streams(imdb_id: str) -> list[dict]:
         }
         if title:
             futures[executor.submit(_try_fanpelis_movie, title)] = "Fanpelis"
+            futures[executor.submit(_try_cinecalidad_movie, title)] = "CineCalidad"
 
         for future in concurrent.futures.as_completed(futures, timeout=60):
             provider = futures[future]
@@ -330,10 +356,17 @@ def find_movie_streams(imdb_id: str) -> list[dict]:
             seen_urls.add(url)
             deduped.append(s)
 
-    result = sort_streams(deduped)
-    # Cache the result
-    set_cached_streams("movie", imdb_id, result)
-    return result
+    # Sort by quality (best first)
+    sorted_streams = sort_streams(deduped)
+    
+    # Verify streams in parallel (filter out dead/test URLs)
+    log.info(f"Verifying {len(sorted_streams)} streams for movie {imdb_id}...")
+    verified = verify_streams_parallel(sorted_streams)
+    log.info(f"Verified: {len(verified)}/{len(sorted_streams)} streams are working")
+    
+    # Cache the verified result
+    set_cached_streams("movie", imdb_id, verified)
+    return verified
 
 
 def find_episode_streams(imdb_id: str, season: int, episode: int) -> list[dict]:
@@ -386,9 +419,16 @@ def find_episode_streams(imdb_id: str, season: int, episode: int) -> list[dict]:
             seen_urls.add(url)
             deduped.append(s)
 
-    result = sort_streams(deduped)
-    set_cached_streams("series", cache_id, result)
-    return result
+    # Sort by quality (best first)
+    sorted_streams = sort_streams(deduped)
+    
+    # Verify streams in parallel (filter out dead/test URLs)
+    log.info(f"Verifying {len(sorted_streams)} streams for episode {imdb_id}:{season}:{episode}...")
+    verified = verify_streams_parallel(sorted_streams)
+    log.info(f"Verified: {len(verified)}/{len(sorted_streams)} streams are working")
+    
+    set_cached_streams("series", cache_id, verified)
+    return verified
 
 
 def find_anime_streams(title: str, episode: int) -> list[dict]:
