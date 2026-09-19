@@ -38,6 +38,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from providers import flixlatam
 from providers import latanime
 from providers import seriesflix
+from providers import tioanime
+from providers import fanpelis
 from utils.flaresolverr import is_enabled as flaresolverr_enabled
 
 # ============================================================
@@ -122,17 +124,47 @@ def manifest():
                 {"name": "page", "isRequired": False, "options": [1, 2, 3, 4, 5]},
             ],
         },
+        {
+            "type": "series",
+            "id": "tioanime_catalog",
+            "name": "TioAnime · Anime",
+            "extraSupported": ["search", "page"],
+            "extra": [
+                {"name": "search", "isRequired": False},
+                {"name": "page", "isRequired": False, "options": [1, 2, 3, 4, 5]},
+            ],
+        },
+        {
+            "type": "movie",
+            "id": "fanpelis_movies",
+            "name": "Fanpelis · Películas HD",
+            "extraSupported": ["search", "page"],
+            "extra": [
+                {"name": "search", "isRequired": False},
+                {"name": "page", "isRequired": False, "options": [1, 2, 3, 4, 5]},
+            ],
+        },
+        {
+            "type": "series",
+            "id": "fanpelis_series",
+            "name": "Fanpelis · Series HD",
+            "extraSupported": ["search", "page"],
+            "extra": [
+                {"name": "search", "isRequired": False},
+                {"name": "page", "isRequired": False, "options": [1, 2, 3, 4, 5]},
+            ],
+        },
     ]
     return {
         "id": ADDON_ID,
         "version": ADDON_VERSION,
         "name": ADDON_NAME,
-        "description": "Streaming en Español y Latino desde FlixLatam + Latanime + SeriesFlix. "
+        "description": "Streaming en Español y Latino desde FlixLatam + Latanime + SeriesFlix + TioAnime + Fanpelis. "
                        "Catálogos completos + resolutor de streams.",
         "logo": "https://flixlatam.com/images/logo.png",
         "resources": ["catalog", "meta", "stream"],
         "types": ["movie", "series"],
-        "idPrefixes": ["tt", "flixlatam:", "latanime:", "seriesflix:"],
+        "idPrefixes": ["tt", "flixlatam:", "latanime:", "seriesflix:", "tioanime:", "fanpelis:"],
         "catalogs": catalogs,
         "behaviorHints": {"configurable": False},
     }
@@ -172,6 +204,15 @@ def catalog(item_type: str, cat_id: str, request: Request):
                 items = seriesflix.search_series(search)
             else:
                 items = seriesflix.get_series_list(page=page)
+        elif cat_id == "tioanime_catalog":
+            if search:
+                items = tioanime.search_anime(search)
+            else:
+                items = tioanime.get_anime_list(page=page)
+        elif cat_id == "fanpelis_movies":
+            items = fanpelis.get_movies(page=page, query=search)
+        elif cat_id == "fanpelis_series":
+            items = fanpelis.get_tvshows(page=page, query=search)
     except Exception as e:
         log.exception(f"catalog error: {e}")
 
@@ -299,6 +340,77 @@ def meta(item_type: str, item_id: str):
         m["videos"] = videos
         return {"meta": m}
 
+    elif item_id.startswith("tioanime:"):
+        slug = item_id[len("tioanime:"):]
+        info = tioanime.get_anime_detail(slug)
+        if not info:
+            return JSONResponse(status_code=404, content={"error": "not found"})
+        m = {
+            "id": f"tioanime:{slug}",
+            "type": "series",
+            "name": info.get("name", slug),
+            "poster": info.get("poster"),
+            "description": info.get("description", ""),
+            "genres": info.get("genres", []),
+        }
+        videos = []
+        for ep in info.get("episodes", []):
+            videos.append({
+                "id": f"tioanime:{slug}:{ep['season']}:{ep['episode']}",
+                "title": f"EP{ep['episode']}",
+                "season": ep["season"],
+                "episode": ep["episode"],
+            })
+        m["videos"] = videos
+        return {"meta": m}
+
+    elif item_id.startswith("fanpelis:"):
+        slug = item_id[len("fanpelis:"):]
+        # Detect if it's a movie or series
+        if item_type == "movie":
+            info = fanpelis.get_movie_detail(slug)
+            if not info:
+                return JSONResponse(status_code=404, content={"error": "not found"})
+            return {"meta": {
+                "id": f"fanpelis:{slug}",
+                "type": "movie",
+                "name": info.get("name", slug),
+                "poster": info.get("poster"),
+                "description": info.get("description", ""),
+            }}
+        else:
+            info = fanpelis.get_tvshow_detail(slug)
+            if not info:
+                return JSONResponse(status_code=404, content={"error": "not found"})
+            m = {
+                "id": f"fanpelis:{slug}",
+                "type": "series",
+                "name": info.get("name", slug),
+                "poster": info.get("poster"),
+                "description": info.get("description", ""),
+            }
+            # Fetch episodes (we have post_id)
+            post_id = info.get("post_id")
+            videos = []
+            if post_id:
+                try:
+                    eps = fanpelis.get_episodes(post_id)
+                    for ep in eps:
+                        # Each episode has season/episode info
+                        season = ep.get("season", 1)
+                        episode_num = ep.get("episode", 1)
+                        ep_id = ep.get("_id") or ep.get("id")
+                        videos.append({
+                            "id": f"fanpelis:{slug}:{season}:{episode_num}:{ep_id}",
+                            "title": f"T{season}E{episode_num}",
+                            "season": season,
+                            "episode": episode_num,
+                        })
+                except Exception as e:
+                    log.warning(f"get_episodes failed: {e}")
+            m["videos"] = videos
+            return {"meta": m}
+
     elif item_id.startswith("tt"):
         return _minimal_imdb_meta(item_type, item_id)
 
@@ -370,6 +482,28 @@ def stream(item_type: str, item_id: str):
             season = int(parts[2])
             episode = int(parts[3])
             streams = seriesflix.resolve_episode_streams(slug, season, episode)
+
+    # TioAnime items: tioanime:{slug}:{season}:{episode}
+    elif "tioanime:" in item_id and item_type == "series":
+        parts = item_id.split(":")
+        if len(parts) >= 4:
+            slug = parts[1]
+            episode = int(parts[3])
+            streams = tioanime.get_episode_streams(slug, episode)
+
+    # Fanpelis items: fanpelis:{slug} (movie) or fanpelis:{slug}:{s}:{e}:{post_id} (episode)
+    elif "fanpelis:" in item_id:
+        parts = item_id.split(":")
+        slug = parts[1] if len(parts) > 1 else ""
+        if item_type == "movie":
+            info = fanpelis.get_movie_detail(slug)
+            if info and info.get("post_id"):
+                streams = fanpelis.resolve_streams(info["post_id"])
+        elif item_type == "series" and len(parts) >= 5:
+            # fanpelis:{slug}:{season}:{episode}:{post_id}
+            post_id = int(parts[4]) if parts[4].isdigit() else None
+            if post_id:
+                streams = fanpelis.resolve_streams(post_id)
 
     # Plain IMDb IDs
     elif item_id.startswith("tt"):
